@@ -1,0 +1,246 @@
+﻿<!DOCTYPE html>
+
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8" />
+    <title></title>
+    <style>
+        body {
+            font: 12px Arial;
+        }
+
+        .grid .tick {
+            stroke: lightgrey;
+            opacity: 0.7;
+        }
+
+        .grid path {
+            stroke-width: 0;
+        }
+
+        .axis path, .axis line {
+            fill: none;
+            stroke: #000;
+            shape-rendering: crispEdges;
+        }
+
+        .x.axis path {
+            /*display: none;*/
+        }
+
+        .line {
+            fill: none;
+            stroke: steelblue;
+            stroke-width: 1.5px;
+        }
+
+        .svg-container {
+            display: inline-block;
+            position: relative;
+            width: 100%;
+            padding-bottom: 50%; /* aspect ratio */
+            vertical-align: top;
+            overflow: hidden;
+        }
+
+        .svg-content-responsive {
+            display: inline-block;
+            position: absolute;
+            top: 10px;
+            left: 20px;
+            bottom: 10px;
+        }
+    </style>
+
+    <!-- load the d3.js library -->
+    <script src="http://d3js.org/d3.v3.min.js"></script>
+
+</head>
+<body>
+
+    <button onclick="updateData()">Reload measurement</button>
+
+    Center frequency: <input id="freq" type="number"> Gain: <input id="gain" type="number">
+    <button onclick="setconfig()">Set config</button>
+    <br />
+    <h2>DDM: <span id="ddm"></span> SDM: <span id="sdm"></span> RF: <span id="rf"></span></h2>
+
+    <div id="chart">
+    </div>
+
+    <script>
+
+        function setconfig() {
+            var config = {};
+            config.center_freq = document.getElementById("freq").value * 1e6;
+            config.gain = document.getElementById("gain").value * 1;
+
+            d3.json("/cmd", function (error, data) {
+                console.log(error, data)
+                updateData();
+            })
+           .header("Content-Type", "application/json")
+           .send("POST", JSON.stringify(config));
+        }
+
+        // Size of chart plotting area
+        var height = 300;
+        var width = 670;
+        // Holds the data received
+        var dataarray;
+        // Holds the ranges
+        var x, y;
+        // Define the line
+        var valueline = d3.svg.line()
+            .x(function (d) { return x(d.x); })
+            .y(function (d) { return y(d.y); });
+
+
+        function convertJsonToArray(data) {
+            dataarray = []; // clear existing data
+            for (var i = 0; i < data["lf-spectrum"].length; i++) {
+                var obj = {};
+                obj.x = data["lf-xf"][i] / 1e6;
+                obj.y = data["lf-spectrum"][i];
+                dataarray.push(obj);
+            }
+        }
+
+        function getFlyText(ddm, freq) {
+            ddm = Math.round(ddm * 100);
+            if (freq < 150e6) {
+                // Localizer (150 Hz dominance on right side of course plane) Ref. http://instrument.landingsystem.com/
+                return ddm === 0 ? "ON COURSE" : (ddm < 0 ? "FLY RIGHT" : "FLY LEFT");
+            }
+            else {
+                // Glidepath (150 Hz dominance under course plane)
+                return ddm === 0 ? "ON COURSE" : (ddm < 0 ? "FLY DOWN" : "FLY UP");
+            }
+        }
+
+        // ** Update data section (Called from the onclick)
+        function updateData() {
+            // Get the data again
+            d3.json("/meas?field=lf-spectrum&field=lf-xf&field=gain&field=center_freq&field=mod90&field=mod150&field=rf", function (error, data) {
+                convertJsonToArray(data);
+                // Select the section we want to apply our changes to
+                var svg = d3.select("div#chart").transition();
+                // Make the changes
+                svg.select(".line")   // change the line
+                    .duration(200)
+                    .attr("d", valueline(dataarray));
+
+                var i = document.getElementById("freq");
+                i.value = data.center_freq / 1e6;
+                i = document.getElementById("gain");
+                i.value = data.gain;
+                i = document.getElementById("ddm");
+                var ddm = data.mod150 - data.mod90;
+                i.textContent = Number(ddm).toFixed(2) + " (" + getFlyText(ddm, data.center_freq) + ")";
+                i = document.getElementById("sdm");
+                i.textContent = Number(data.mod150 + data.mod90).toFixed(2);
+                i = document.getElementById("rf");
+                i.textContent = Number(data.rf).toFixed(2);
+            });
+        }
+
+        function updateConfig() {
+            d3.json("/meas?field=gain&field=center_freq", function (error, data) {
+                var i = document.getElementById("freq");
+                i.value = data.center_freq / 1e6;
+                i = document.getElementById("gain");
+                i.value = data.gain;
+            })
+        }
+
+        updateConfig();
+        d3.json("/meas?field=lf-spectrum&field=lf-xf", function (error, data) {
+
+            convertJsonToArray(data);
+
+            // Set the ranges
+            x = d3.scale.linear().domain(d3.extent(dataarray, function (d) { return d.x; })).range([0, width]);
+            //y = d3.scale.linear().domain(d3.extent(dataarray, function (d) { return d.y; })).range([height, 0]);
+            y = d3.scale.linear().domain([0, 1]).range([height, 0]);
+
+            var zoom = d3.behavior.zoom()
+                .x(x)
+                .y(y)
+                .on("zoom", zoomed);
+
+            // Adds the svg canvas
+            svg = d3.select("div#chart")
+                .append("div")
+                .classed("svg-container", true) //container class to make it responsive
+                .append("svg")
+                //responsive SVG needs these 2 attributes and no width and height attr
+                .attr("preserveAspectRatio", "xMinYMin meet")
+                .attr("viewBox", "-40 -10 " + (width + 60) + " " + height + 40)
+                //class to make it responsive
+                .classed("svg-content-responsive", true)
+                .call(zoom);
+
+            var make_x_axis = function () {
+                return d3.svg.axis()
+                    .scale(x)
+                    .orient("bottom")
+                    .ticks(10);
+            };
+
+            var make_y_axis = function () {
+                return d3.svg.axis()
+                    .scale(y)
+                    .orient("left")
+                    .ticks(10);
+            };
+
+            var xAxis = make_x_axis();
+            var yAxis = make_y_axis();
+
+            svg.append("svg:g")
+                .attr("class", "x axis")
+                .attr("transform", "translate(0, " + height + ")")
+                .call(xAxis);
+
+            svg.append("svg:g")
+                .attr("class", "y axis")
+                .call(yAxis);
+
+            svg.append("svg:g")
+                .attr("class", "x grid")
+                .attr("transform", "translate(0," + height + ")")
+                .call(make_x_axis().tickSize(-height, 0, 0).tickFormat(""));
+
+            svg.append("g")
+                .attr("class", "y grid")
+                .call(make_y_axis().tickSize(-width, 0, 0).tickFormat(""));
+
+            var clip = svg.append("svg:clipPath")
+                .attr("id", "clip")
+                .append("svg:rect")
+                .attr("x", 0)
+                .attr("y", 0)
+                .attr("width", width)
+                .attr("height", height);
+
+            var chartBody = svg.append("svg:g")
+                .attr("clip-path", "url(#clip)");
+
+            chartBody.append("svg:path")
+                .datum(data)
+                .attr("class", "line")
+                .attr("d", valueline(dataarray));
+
+            function zoomed() {
+                svg.select(".x.axis").call(xAxis);
+                svg.select(".y.axis").call(yAxis);
+                svg.select(".x.grid").call(make_x_axis().tickSize(-height, 0, 0).tickFormat(""));
+                svg.select(".y.grid").call(make_y_axis().tickSize(-width, 0, 0).tickFormat(""));
+                svg.select(".line").attr("class", "line").attr("d", valueline(dataarray));
+            }
+        });
+
+    </script>
+</body>
+
+</html>
